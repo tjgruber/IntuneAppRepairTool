@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using Microsoft.Win32;
 using System.Security.Principal;
+using System.Diagnostics;
 
 namespace IntuneAppRepairTool
 {
@@ -20,6 +21,59 @@ namespace IntuneAppRepairTool
         }
 
         private List<AppEntry> _discoveredApps = new List<AppEntry>();
+
+        public List<AppEntry> ScanImeLogs()
+        {
+            var discovered = new List<AppEntry>();
+
+            string logDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                @"Microsoft\IntuneManagementExtension\Logs");
+
+            if (!Directory.Exists(logDir))
+                return discovered;
+
+            string pattern = @"""Id""\s*:\s*""(?<Id>[a-f0-9\-]+)""\s*,\s*""Name""\s*:\s*""(?<Name>[^""]+)""|""Name""\s*:\s*""(?<Name>[^""]+)""\s*,\s*""Id""\s*:\s*""(?<Id>[a-f0-9\-]+)""";
+            Regex regex = new Regex(pattern, RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+            foreach (string file in Directory.GetFiles(logDir, "*.log"))
+            {
+                try
+                {
+                    string content;
+                    using (var fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                    using (var reader = new StreamReader(fs))
+                    {
+                        content = reader.ReadToEnd();
+                    }
+
+                    foreach (Match match in regex.Matches(content))
+                    {
+                        string appId = match.Groups["Id"].Value;
+                        string appName = match.Groups["Name"].Value;
+
+                        if (!string.IsNullOrWhiteSpace(appId) && !string.IsNullOrWhiteSpace(appName))
+                        {
+                            if (!discovered.Exists(a => a.AppId == appId && a.AppName == appName))
+                            {
+                                discovered.Add(new AppEntry
+                                {
+                                    AppName = appName,
+                                    AppId = appId,
+                                    File = file
+                                });
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                    // ignore
+                }
+            }
+
+            return discovered;
+        }
 
         public MainWindow()
         {
@@ -49,9 +103,18 @@ namespace IntuneAppRepairTool
 
         private void AppendLog(string message)
         {
+            string log = $"[{DateTime.Now:T}] {message}";
+
+            // CLI mode fallback
+            if (Application.Current?.MainWindow != this || !this.IsLoaded)
+            {
+                Console.WriteLine(log);
+                return;
+            }
+
             Dispatcher.Invoke(() =>
             {
-                LogPane.AppendText($"[{DateTime.Now:T}] {message}{Environment.NewLine}");
+                LogPane.AppendText(log + Environment.NewLine);
                 LogPane.ScrollToEnd();
             });
         }
@@ -63,62 +126,7 @@ namespace IntuneAppRepairTool
             AppDataGrid.ItemsSource = null;
             AppDataGrid.Items.Refresh();
 
-            await Task.Run(() =>
-            {
-                _discoveredApps.Clear();
-
-                string logDir = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-                    @"Microsoft\IntuneManagementExtension\Logs");
-
-                if (!Directory.Exists(logDir))
-                {
-                    Dispatcher.Invoke(() =>
-                    {
-                        MessageBox.Show($"IME log directory not found: {logDir}", "Error", MessageBoxButton.OK, MessageBoxImage.Warning);
-                    });
-                    return;
-                }
-
-                string pattern = @"""Id""\s*:\s*""(?<Id>[a-f0-9\-]+)""\s*,\s*""Name""\s*:\s*""(?<Name>[^""]+)""|""Name""\s*:\s*""(?<Name>[^""]+)""\s*,\s*""Id""\s*:\s*""(?<Id>[a-f0-9\-]+)""";
-                Regex regex = new Regex(pattern, RegexOptions.Compiled | RegexOptions.IgnoreCase);
-
-                foreach (string file in Directory.GetFiles(logDir, "*.log"))
-                {
-                    try
-                    {
-                        string content;
-                        using (var fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
-                        using (var reader = new StreamReader(fs))
-                        {
-                            content = reader.ReadToEnd();
-                        }
-
-                        foreach (Match match in regex.Matches(content))
-                        {
-                            string appId = match.Groups["Id"].Value;
-                            string appName = match.Groups["Name"].Value;
-
-                            if (!string.IsNullOrWhiteSpace(appId) && !string.IsNullOrWhiteSpace(appName))
-                            {
-                                if (!_discoveredApps.Exists(a => a.AppId == appId && a.AppName == appName))
-                                {
-                                    _discoveredApps.Add(new AppEntry
-                                    {
-                                        AppName = appName,
-                                        AppId = appId,
-                                        File = file
-                                    });
-                                }
-                            }
-                        }
-                    }
-                    catch
-                    {
-                        // Skip locked logs silently
-                    }
-                }
-            });
+            _discoveredApps = await Task.Run(() => ScanImeLogs());
 
             AppDataGrid.ItemsSource = _discoveredApps;
             ScanLogsButton.IsEnabled = true;
@@ -168,7 +176,7 @@ namespace IntuneAppRepairTool
             StatusText.Text = $"Processed {selectedApps.Count} app(s) at {DateTime.Now:T}.";
         }
 
-        private void KillCompanyPortal(bool dryRun)
+        public void KillCompanyPortal(bool dryRun)
         {
             if (dryRun)
             {
@@ -191,7 +199,7 @@ namespace IntuneAppRepairTool
             }
         }
 
-        private void LaunchCompanyPortal(bool dryRun)
+        public void LaunchCompanyPortal(bool dryRun)
         {
             if (dryRun)
             {
@@ -201,7 +209,7 @@ namespace IntuneAppRepairTool
 
             try
             {
-                System.Diagnostics.Process.Start("shell:AppsFolder\\Microsoft.CompanyPortal_8wekyb3d8bbwe!App");
+                Process.Start("explorer.exe", "shell:AppsFolder\\Microsoft.CompanyPortal_8wekyb3d8bbwe!App");
                 AppendLog("Company Portal launched.");
             }
             catch (Exception ex)
@@ -210,7 +218,7 @@ namespace IntuneAppRepairTool
             }
         }
 
-        private void RestartIMEService(bool dryRun)
+        public void RestartIMEService(bool dryRun)
         {
             if (dryRun)
             {
@@ -238,15 +246,15 @@ namespace IntuneAppRepairTool
             }
         }
 
-        private void DeleteRegistryKeys(string appId, bool dryRun)
+        public void DeleteRegistryKeys(string appId, bool dryRun)
         {
             var hklm64 = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64);
 
             string[] rootsToScan =
             {
-        @"SOFTWARE\Microsoft\IntuneManagementExtension\Win32Apps",
-        @"SOFTWARE\Microsoft\IntuneManagementExtension\SideCarPolicies\StatusServiceReports"
-    };
+                @"SOFTWARE\Microsoft\IntuneManagementExtension\Win32Apps",
+                @"SOFTWARE\Microsoft\IntuneManagementExtension\SideCarPolicies\StatusServiceReports"
+            };
 
             foreach (var root in rootsToScan)
             {
@@ -270,7 +278,7 @@ namespace IntuneAppRepairTool
                 }
             }
 
-            // AppAuthority cleanup (value name match)
+            // AppAuthority cleanup
             try
             {
                 string appAuthorityPath = @"SOFTWARE\Microsoft\IntuneManagementExtension\Win32Apps\Reporting\AppAuthority";
@@ -297,11 +305,11 @@ namespace IntuneAppRepairTool
                 AppendLog($"Error cleaning AppAuthority: {ex.Message}");
             }
 
-            // GRS cleanup (value name match OR value data match)
+            // GRS cleanup
             try
             {
                 string basePath = @"SOFTWARE\Microsoft\IntuneManagementExtension\Win32Apps";
-                using var baseKey = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64).OpenSubKey(basePath, writable: true);
+                using var baseKey = hklm64.OpenSubKey(basePath, writable: true);
                 if (baseKey != null)
                 {
                     foreach (var userGuid in baseKey.GetSubKeyNames())
@@ -320,17 +328,11 @@ namespace IntuneAppRepairTool
                             {
                                 var value = grsSub.GetValue(valName);
 
-                                if (valName.Equals(appId, StringComparison.OrdinalIgnoreCase))
+                                if (valName.Equals(appId, StringComparison.OrdinalIgnoreCase) ||
+                                    (value != null && value.ToString().Equals(appId, StringComparison.OrdinalIgnoreCase)))
                                 {
                                     matched = true;
-                                    AppendLog($"Match in value name: [{valName}] under key: {basePath}\\{userGuid}\\GRS\\{subkeyName}");
-                                    break;
-                                }
-
-                                if (value != null && value.ToString().Equals(appId, StringComparison.OrdinalIgnoreCase))
-                                {
-                                    matched = true;
-                                    AppendLog($"Match in value data: [{valName}] = [{value}] under key: {basePath}\\{userGuid}\\GRS\\{subkeyName}");
+                                    AppendLog($"Match found in GRS key: {basePath}\\{userGuid}\\GRS\\{subkeyName}");
                                     break;
                                 }
                             }
@@ -372,7 +374,6 @@ namespace IntuneAppRepairTool
                     {
                         if (subKey != null)
                         {
-                            // Recursively process deeper levels
                             RecursiveDeleteMatchingKeys(subKey, fullSubKeyPath, appId, dryRun);
 
                             foreach (var valueName in subKey.GetValueNames())
@@ -388,15 +389,12 @@ namespace IntuneAppRepairTool
                         }
                     }
 
-                    // Delete if match found
                     if (matchInName || matchInValues || matchInFullPath)
                     {
                         try
                         {
                             if (dryRun)
-                            {
                                 AppendLog($"[Dry-run] Would delete key: {fullSubKeyPath}");
-                            }
                             else
                             {
                                 parentKey.DeleteSubKeyTree(subkeyName);
