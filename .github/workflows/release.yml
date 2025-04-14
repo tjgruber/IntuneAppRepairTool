@@ -1,4 +1,4 @@
-name: Build and Release
+name: Build and Release (.NET 8 GUI+CLI)
 
 on:
   push:
@@ -13,25 +13,31 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup NuGet
-        uses: NuGet/setup-nuget@v1
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
 
-      - name: Restore NuGet packages
-        run: nuget restore IntuneAppRepairTool.sln
+      - name: Restore dependencies
+        run: dotnet restore
 
-      - name: Build with MSBuild
-        run: |
-          & "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Current\Bin\MSBuild.exe" `
-            IntuneAppRepairTool.sln `
-            /p:Configuration=Release `
-            /p:Platform="Any CPU"
-        shell: pwsh
-
-      - name: Zip output
+      - name: Publish single-file EXE (Self-contained)
         run: |
           $tag = "${{ github.ref_name }}"
+          $outputDir = "publish"
           $zipName = "IntuneAppRepairTool_$tag.zip"
-          Compress-Archive -Path bin\Release\* -DestinationPath $zipName
+
+          dotnet publish IntuneAppRepairTool.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained true `
+            -p:PublishSingleFile=true `
+            -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:EnableCompressionInSingleFile=true `
+            -p:PublishTrimmed=false `
+            -o $outputDir
+
+          Compress-Archive -Path "$outputDir\*" -DestinationPath $zipName
           echo "ZIP_NAME=$zipName" >> $env:GITHUB_ENV
         shell: pwsh
 
